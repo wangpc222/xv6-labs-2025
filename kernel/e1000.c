@@ -93,32 +93,83 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(char *buf, int len)
 {
-  //
-  // Your code here.
-  //
-  // buf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after send completes.
-  //
-  // return 0 on success.
-  // return -1 on failure (e.g., there is no descriptor available)
-  // so that the caller knows to free buf.
-  //
+  acquire(&e1000_lock);
 
-  
+  // Get the next available TX descriptor index
+  int idx = regs[E1000_TDT];
+
+  // Check if the descriptor is available (E1000 finished with it)
+  if (!(tx_ring[idx].status & E1000_TXD_STAT_DD)) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // Free the previous buffer if there was one
+  if (tx_ring[idx].addr != 0) {
+    kfree((void*)tx_ring[idx].addr);
+  }
+
+  // Fill in the descriptor
+  tx_ring[idx].addr = (uint64)buf;
+  tx_ring[idx].length = len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[idx].status = 0;
+
+  // Update the tail register to notify the E1000
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver a buf for each packet (using net_rx()).
-  //
+  // We must not hold the lock while calling net_rx() because
+  // net_rx() -> arp_rx() -> e1000_transmit() also acquires the lock.
+  // Instead, collect buffers under the lock, replenish the ring,
+  // then drop the lock and deliver to net_rx().
 
+  char *bufs[RX_RING_SIZE];
+  int lens[RX_RING_SIZE];
+  int n = 0;
+
+  acquire(&e1000_lock);
+
+  int last = regs[E1000_RDT];
+
+  while (n < RX_RING_SIZE) {
+    int idx = (last + 1) % RX_RING_SIZE;
+    if (!(rx_ring[idx].status & E1000_RXD_STAT_DD))
+      break;
+
+    // Save the buffer for delivery outside the lock
+    bufs[n] = (char*)rx_ring[idx].addr;
+    lens[n] = rx_ring[idx].length;
+    n++;
+
+    // Allocate a new buffer and replenish the descriptor
+    char *new_buf = kalloc();
+    if (new_buf == 0) {
+      // Out of memory: clear the descriptor to avoid reuse of stale addr
+      rx_ring[idx].addr = 0;
+      rx_ring[idx].status = 0;
+      break;
+    }
+
+    rx_ring[idx].addr = (uint64)new_buf;
+    rx_ring[idx].status = 0;
+
+    last = idx;
+  }
+
+  regs[E1000_RDT] = last;
+
+  release(&e1000_lock);
+
+  // Deliver packets without holding the lock
+  for (int i = 0; i < n; i++)
+    net_rx(bufs[i], lens[i]);
 }
 
 void
