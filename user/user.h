@@ -59,6 +59,8 @@ int memcmp(const void *, const void *, uint);
 void *memcpy(void *, const void *, uint);
 char* sbrk(int);
 char* sbrklazy(int);
+void* mmap(void*, uint64, int, int, int, int);
+int munmap(void*, uint64);
 #ifdef LAB_LOCK
 int statistics(void*, int);
 #endif

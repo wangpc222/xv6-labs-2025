@@ -503,3 +503,136 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// Find a free VMA slot for the current process.
+static struct vma*
+find_free_vma(void)
+{
+  struct proc *p = myproc();
+  for (int i = 0; i < NVMA; i++) {
+    if (!p->vma[i].used)
+      return &p->vma[i];
+  }
+  return 0;
+}
+
+// Find the next available virtual address for mmap.
+static uint64
+find_mmap_addr(uint64 len)
+{
+  struct proc *p = myproc();
+  uint64 addr = MAP_ADDR_LOW;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vma[i].used) {
+      uint64 end = p->vma[i].addr + p->vma[i].len;
+      if (end > addr)
+        addr = end;
+    }
+  }
+  return PGROUNDUP(addr);
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int len, prot, flags, fd, off;
+  struct file *f;
+
+  argaddr(0, &addr);
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &off);
+
+  if (addr != 0 || off != 0)
+    return -1;
+
+  if (fd < 0 || fd >= NOFILE || (f = myproc()->ofile[fd]) == 0)
+    return -1;
+
+  if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+    return -1;
+
+  struct vma *v = find_free_vma();
+  if (v == 0) return -1;
+
+  uint64 map_len = PGROUNDUP(len);
+  if (map_len == 0) return -1;
+
+  uint64 map_addr = find_mmap_addr(map_len);
+  if (map_addr + map_len > MAXVA - 2*PGSIZE) return -1;
+
+  v->used = 1;
+  v->addr = map_addr;
+  v->len = map_len;
+  v->prot = prot;
+  v->flags = flags;
+  v->file_off = off;
+  v->f = filedup(f);
+
+  return map_addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+
+  argaddr(0, &addr);
+  argint(1, &len);
+
+  struct proc *p = myproc();
+
+  struct vma *v = 0;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vma[i].used && p->vma[i].addr <= addr &&
+        addr < p->vma[i].addr + p->vma[i].len) {
+      v = &p->vma[i];
+      break;
+    }
+  }
+  if (v == 0) return -1;
+
+  uint64 unmap_len = PGROUNDUP(len);
+  if (unmap_len == 0) return -1;
+
+  if (v->flags == MAP_SHARED && (v->prot & PROT_WRITE)) {
+    begin_op();
+    ilock(v->f->ip);
+    for (uint64 off = 0; off < unmap_len; off += PGSIZE) {
+      uint64 va = addr + off;
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if (pte == 0 || (*pte & PTE_V) == 0)
+        continue;
+      uint64 pa = PTE2PA(*pte);
+      uint64 file_off = (va - v->addr) + v->file_off;
+      if (file_off < v->f->ip->size) {
+        int n = PGSIZE;
+        if (file_off + n > v->f->ip->size)
+          n = v->f->ip->size - file_off;
+        if (n > 0)
+          writei(v->f->ip, 0, pa, file_off, n);
+      }
+    }
+    iunlock(v->f->ip);
+    end_op();
+  }
+
+  uvmunmap(p->pagetable, addr, unmap_len / PGSIZE, 1);
+
+  if (addr == v->addr && unmap_len >= v->len) {
+    fileclose(v->f);
+    v->used = 0;
+  } else if (addr == v->addr) {
+    v->addr += unmap_len;
+    v->file_off += unmap_len;
+    v->len -= unmap_len;
+  } else if (addr + unmap_len >= v->addr + v->len) {
+    v->len -= unmap_len;
+  }
+
+  return 0;
+}

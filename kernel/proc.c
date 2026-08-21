@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -279,6 +283,16 @@ kfork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  // Copy VMA table from parent to child.
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vma[i].used) {
+      np->vma[i] = p->vma[i];
+      filedup(np->vma[i].f);
+    } else {
+      np->vma[i].used = 0;
+    }
+  }
+
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -327,6 +341,39 @@ kexit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap all mmap'd regions (write back MAP_SHARED if needed).
+  for (int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vma[i];
+    if (v->used && v->f) {
+      // Write back MAP_SHARED dirty pages.
+      if (v->flags == MAP_SHARED && (v->prot & PROT_WRITE)) {
+        begin_op();
+        ilock(v->f->ip);
+        for (uint64 off = 0; off < v->len; off += PGSIZE) {
+          uint64 va = v->addr + off;
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if (pte == 0 || (*pte & PTE_V) == 0)
+            continue;
+          uint64 pa = PTE2PA(*pte);
+          uint64 file_off = off + v->file_off;
+          if (file_off < v->f->ip->size) {
+            int n = PGSIZE;
+            if (file_off + n > v->f->ip->size)
+              n = v->f->ip->size - file_off;
+            if (n > 0)
+              writei(v->f->ip, 0, pa, file_off, n);
+          }
+        }
+        iunlock(v->f->ip);
+        end_op();
+      }
+      // Unmap pages and close file reference.
+      uvmunmap(p->pagetable, v->addr, v->len / PGSIZE, 1);
+      fileclose(v->f);
+      v->used = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

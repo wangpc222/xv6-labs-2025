@@ -81,6 +81,21 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+
+#define NVMA 16
+#define MAP_ADDR_LOW  0x10000000  // start of mmap address range
+
+struct vma {
+  int used;              // 0 if free
+  uint64 addr;           // virtual address of the mapping
+  uint64 len;            // length in bytes
+  int prot;              // PROT_READ, PROT_WRITE
+  int flags;             // MAP_SHARED or MAP_PRIVATE
+  uint64 file_off;       // offset in file
+  struct file *f;        // mapped file
+};
+
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -102,6 +117,7 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
+  struct vma vma[NVMA];        // Virtual memory areas
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };

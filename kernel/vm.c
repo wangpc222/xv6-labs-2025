@@ -7,6 +7,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "file.h"
 
 /*
  * the kernel's page table.
@@ -455,12 +458,52 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   uint64 mem;
   struct proc *p = myproc();
 
-  if (va >= p->sz)
-    return 0;
   va = PGROUNDDOWN(va);
+  if(va >= MAXVA)
+    return 0;
   if(ismapped(pagetable, va)) {
     return 0;
   }
+
+  // Check if this is an mmap'd region
+  for (int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vma[i];
+    if (v->used && va >= v->addr && va < v->addr + v->len) {
+      // This is a page fault in an mmap'd region.
+      // Allocate a physical page and read the file content into it.
+      mem = (uint64) kalloc();
+      if (mem == 0)
+        return 0;
+      memset((void *) mem, 0, PGSIZE);
+
+      // Read file content into the allocated page.
+      uint64 file_off = (va - v->addr) + v->file_off;
+      if (file_off < v->f->ip->size) {
+        ilock(v->f->ip);
+        readi(v->f->ip, 0, mem, file_off, PGSIZE);
+        iunlock(v->f->ip);
+      }
+
+      // Determine page permissions based on VMA prot.
+      int perm = PTE_U;
+      if (v->prot & PROT_READ)
+        perm |= PTE_R;
+      if (v->prot & PROT_WRITE)
+        perm |= PTE_W;
+      if (v->prot & PROT_EXEC)
+        perm |= PTE_X;
+
+      if (mappages(p->pagetable, va, PGSIZE, mem, perm) != 0) {
+        kfree((void *)mem);
+        return 0;
+      }
+      return mem;
+    }
+  }
+
+  // Not an mmap region — try the sbrk lazy allocation path.
+  if (va >= p->sz)
+    return 0;
   mem = (uint64) kalloc();
   if(mem == 0)
     return 0;

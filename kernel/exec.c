@@ -133,6 +133,15 @@ kexec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
   p->trapframe->sp = sp; // initial stack pointer
+
+  // Close any mmap'd files (VMA entries are stale after exec).
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vma[i].used) {
+      fileclose(p->vma[i].f);
+      p->vma[i].used = 0;
+    }
+  }
+
   proc_freepagetable(oldpagetable, oldsz);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
