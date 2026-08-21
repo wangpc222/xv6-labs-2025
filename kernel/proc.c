@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -286,6 +287,8 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  np->mask = p->mask;
+  safestrcpy(np->allowed_path, p->allowed_path, MAXPATH);
 
   pid = np->pid;
 
