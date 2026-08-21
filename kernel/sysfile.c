@@ -335,7 +335,37 @@ sys_open(void)
     }
   }
 
+  // Follow symbolic links unless O_NOFOLLOW is specified.
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    char target[MAXPATH];
+    int depth = 0;
+    for(;;) {
+      if(++depth > 10){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      if(readi(ip, 0, (uint64)target, 0, MAXPATH) < 0){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      struct inode *next = namei(target);
+      if(next == 0){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip);
+      ip = next;
+      ilock(ip);
+      if(ip->type != T_SYMLINK)
+        break;
+    }
+  }
+
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
+
     iunlockput(ip);
     end_op();
     return -1;
@@ -501,5 +531,33 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// Create a symbolic link at path pointing to target.
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // Store target path in the symlink inode's data blocks.
+  if(writei(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }

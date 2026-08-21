@@ -62,7 +62,6 @@ endif
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
 #TOOLPREFIX = 
-
 # Try to infer the correct TOOLPREFIX if not set
 ifndef TOOLPREFIX
 TOOLPREFIX := $(shell if riscv64-unknown-elf-objdump -i 2>&1 | grep 'elf64-big' >/dev/null 2>&1; \
@@ -261,7 +260,8 @@ endif
 
 ifeq ($(LAB),fs)
 UPROGS += \
-	$U/_bigfile
+	$U/_bigfile \
+	$U/_symlinktest
 endif
 
 
