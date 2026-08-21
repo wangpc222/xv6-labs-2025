@@ -1,0 +1,5 @@
+1. usertrap() called syscall()
+  2. a7 = 15, which is the system call number for SYS_open
+  3. sstatus SPP=0, previous mode was U-mode (user mode)
+  4. lw a3, 0(zero) at 0x80001cf8, register a3 corresponds to num
+  5. process "init", pid 1
