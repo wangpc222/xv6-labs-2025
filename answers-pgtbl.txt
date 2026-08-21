@@ -1,0 +1,262 @@
+Inspect a user-process page table
+===================================
+
+Below is the output of print_pgtbl() from pgtbltest, followed by an
+explanation of each page table entry.
+
+=== Raw output (pgtbltest on xv6-2025 pgtbl branch) ===
+
+va 0x0 pte 0x21FC885B pa 0x87F22000 perm 0x5B
+va 0x1000 pte 0x21FC7C5B pa 0x87F1F000 perm 0x5B
+va 0x2000 pte 0x21FC7817 pa 0x87F1E000 perm 0x17
+va 0x3000 pte 0x21FC7407 pa 0x87F1D000 perm 0x07
+va 0x4000 pte 0x21FC70D7 pa 0x87F1C000 perm 0xD7
+va 0x5000 pte 0x0 pa 0x0 perm 0x0
+va 0x6000 pte 0x0 pa 0x0 perm 0x0
+va 0x7000 pte 0x0 pa 0x0 perm 0x0
+va 0x8000 pte 0x0 pa 0x0 perm 0x0
+va 0x9000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFF6000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFF7000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFF8000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFF9000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFFA000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFFB000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFFC000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFFD000 pte 0x0 pa 0x0 perm 0x0
+va 0x3FFFFFE000 pte 0x21FD08C7 pa 0x87F42000 perm 0xC7
+va 0x3FFFFFF000 pte 0x2000184B pa 0x80006000 perm 0x4B
+
+=== Background: xv6/RISC-V process memory layout ===
+
+pgtbltest has two ELF LOAD segments:
+  - TEXT (r-x): VA 0x0, memsz=0x1674  -> occupies pages VA 0x0 and 0x1000
+  - DATA (rw-): VA 0x2000, memsz=0x30 -> occupies page VA 0x2000
+          contains symbols: testname (0x2000), freep (0x2010), base (0x2020)
+
+After loading the ELF segments, exec() allocates a guard page and a
+user stack (USERSTACK=1):
+  - PGROUNDUP(sz=0x2030) = 0x3000
+  - uvmalloc(0x3000, 0x3000 + (1+1)*4096, PTE_W) -> pages at 0x3000..0x4FFF
+  - uvmclear(0x3000) -> removes PTE_U from the guard page
+
+High-address reserved pages:
+  - TRAPFRAME = TRAMPOLINE - PGSIZE = 0x3FFFFFE000
+  - TRAMPOLINE = MAXVA - PGSIZE = 0x3FFFFFF000
+
+PTE permission-bit layout (Sv39):
+  bit 0: V (Valid)     bit 1: R (Readable)
+  bit 2: W (Writable)   bit 3: X (Executable)
+  bit 4: U (User)       bit 5: G (Global)
+  bit 6: A (Accessed)   bit 7: D (Dirty)
+  bit 8: RSW (supervisor software)
+
+=== Per-entry explanations ===
+
+VA 0x0  (pte 0x21FC885B, pa 0x87F22000, perm 0x5B)
+  Content: First page of the process's text (code) segment.
+  Contains the start of pgtbltest's executable code.
+  Permissions (0x5B = 01011011b):
+    V=1,R=1,W=0,X=1,U=1,G=0,A=1,D=0
+    The page is readable and executable (but NOT writable) from user
+    mode. A=1 indicates the page has been accessed (instruction fetches
+    have occurred). D=0 because no stores happened to this page.
+
+VA 0x1000  (pte 0x21FC7C5B, pa 0x87F1F000, perm 0x5B)
+  Content: Second page of the text segment.
+  Contains more of pgtbltest's code (e.g. library routines like
+  printf, malloc, etc., whose symbols lie above 0x1000).
+  Permissions: identical to VA 0x0 (R-X U A).
+
+VA 0x2000  (pte 0x21FC7817, pa 0x87F1E000, perm 0x17)
+  Content: Data/BSS page.
+  Contains the global variable testname[] at offset 0, and BSS
+  variables freep and base. Only filesz=0x10 bytes of initialized
+  data are loaded from the ELF; the remainder (0x20 bytes) is
+  zero-filled BSS.
+  Permissions (0x17 = 00010111b):
+    V=1,R=1,W=1,X=0,U=1,G=0,A=0,D=0
+    The page is readable and writable from user mode but NOT
+    executable. A=0 (not accessed) because pgtbltest's print_pgtbl()
+    never reads or writes this page (testname is only used by err(),
+    which is not called). D=0 because no stores have occurred.
+
+VA 0x3000  (pte 0x21FC7407, pa 0x87F1D000, perm 0x07)
+  Content: Stack guard page.
+  Allocated as part of the stack region but made inaccessible to user
+  mode by exec() calling uvmclear(). If the user stack overflows
+  (grows downward past VA 0x4000 into 0x3000), the access will hit
+  this page and trigger a page fault (scause=15 for store).
+  Permissions (0x07 = 00000111b):
+    V=1,R=1,W=1,X=0,U=0,G=0,A=0,D=0
+    Valid, readable, writable, but supervisor-only (U=0). The user
+    program cannot access this page.
+
+VA 0x4000  (pte 0x21FC70D7, pa 0x87F1C000, perm 0xD7)
+  Content: User stack page.
+  This is the actual stack used by the pgtbltest process. The initial
+  stack pointer (p->trapframe->sp) points to the top of this page.
+  Arguments to main() and return addresses are stored here.
+  Permissions (0xD7 = 11010111b):
+    V=1,R=1,W=1,X=0,U=1,G=0,A=1,D=1
+    Readable and writable from user mode. A=1 and D=1 because the
+    process has actively used the stack (function calls, local
+    variable accesses), so the hardware has set both bits.
+
+VA 0x5000 .. 0x9000  (PTE=0)
+  Content: Unmapped.
+  These virtual addresses are not part of the process's address space.
+  The process has only 5 mapped pages (2 text + 1 data + 1 guard
+  + 1 stack) in the low region. Any access would fault.
+
+VA 0x3FFFFF6000 .. 0x3FFFFFD000  (PTE=0)
+  Content: Unmapped high addresses.
+  These VAs lie between the top of the heap and TRAPFRAME. They are
+  not mapped (the process has not called sbrk() to extend the heap).
+  print_pgtbl() iterates the last 10 VAs below MAXVA; these 8 entries
+  are unmapped. (The next two entries are TRAPFRAME and TRAMPOLINE.)
+
+VA 0x3FFFFFE000  (pte 0x21FD08C7, pa 0x87F42000, perm 0xC7)
+  Content: TRAPFRAME page (struct trapframe).
+  This page holds the saved user registers when a trap (system call,
+  interrupt, or exception) enters the kernel. The trampoline's
+  uservec code saves registers here, and userret restores them.
+  It is mapped in the user page table so that the trampoline can
+  access it without switching page tables, but is NOT accessible
+  from user mode (U=0), preventing the user process from reading
+  or corrupting its own saved state.
+  Permissions (0xC7 = 11000111b):
+    V=1,R=1,W=1,X=0,U=0,G=0,A=1,D=1
+    Supervisor-only readable and writable. A=1 and D=1 because the
+    kernel has written register state here during traps.
+
+VA 0x3FFFFFF000  (pte 0x2000184B, pa 0x80006000, perm 0x4B)
+  Content: TRAMPOLINE page.
+  Contains the trampoline assembly code (trampoline.S: uservec and
+  userret). This page is mapped at the SAME physical address in both
+  the user and kernel page tables, so that during a trap the TLB
+  continues to translate correctly while satp is being swapped.
+  Permissions (0x4B = 01001011b):
+    V=1,R=1,W=0,X=1,U=0,G=0,A=1,D=0
+    Supervisor-only readable and executable. A=1 because the kernel
+    has fetched instructions from this page. D=0 (no writes to the
+    trampoline code, which is read-only).
+
+
+Speed up system calls
+======================
+
+Which other xv6 system call(s) could be made faster using this shared
+page? Explain how.
+
+Any system call that only reads small, read-only process state can be
+accelerated with this technique, since the kernel can publish the data
+in a shared read-only page and userspace can read it directly without
+trapping into the kernel.
+
+In xv6, one candidate is the uptime() system call. The kernel
+maintains a ticks variable (incremented by the timer interrupt).
+Instead of making a syscall to read it, the kernel could write the
+current tick count into the shared usyscall page (or a separate
+shared page) on every timer tick. Userspace would read it directly
+as a memory load, eliminating the syscall overhead for any process
+that needs to check the time.
+
+Another candidate is getppid() (if xv6 had one, or if the lab
+required it). The parent PID could be stored in the usyscall
+structure at fork() time, and the child would read it from userspace.
+
+
+Print a page table (vmprint)
+=============================
+
+The vmprint() function recursively walks the 3-level Sv39 page table
+and prints each valid PTE with its depth, virtual address, raw PTE
+bits, and physical address.
+
+The output below comes from the kernel page table of the pgtbltest
+process (the same process inspected in the print_pgtbl() exercise).
+
+=== vmprint output ===
+
+page table 0x0000000087f22000
+ ..0x0000000000000000: pte 0x0000000021fc7801 pa 0x0000000087f1e000
+ .. ..0x0000000000000000: pte 0x0000000021fc7401 pa 0x0000000087f1d000
+ .. .. ..0x0000000000000000: pte 0x0000000021fc7c5b pa 0x0000000087f1f000
+ .. .. ..0x0000000000001000: pte 0x0000000021fc705b pa 0x0000000087f1c000
+ .. .. ..0x0000000000002000: pte 0x0000000021fc6cd7 pa 0x0000000087f1b000
+ .. .. ..0x0000000000003000: pte 0x0000000021fc6807 pa 0x0000000087f1a000
+ .. .. ..0x0000000000004000: pte 0x0000000021fc64d7 pa 0x0000000087f19000
+ ..0x0000003fc0000000: pte 0x0000000021fc8401 pa 0x0000000087f21000
+ .. ..0x0000003fffe00000: pte 0x0000000021fc8001 pa 0x0000000087f20000
+ .. .. ..0x0000003fffffd000: pte 0x0000000021fd4853 pa 0x0000000087f52000
+ .. .. ..0x0000003fffffe000: pte 0x0000000021fd00c7 pa 0x0000000087f40000
+ .. .. ..0x0000003ffffff000: pte 0x000000002000184b pa 0x0000000080006000
+
+The indentation shows the 3-level Sv39 page table hierarchy:
+  
+
+
+Print a page table (vmprint)
+=============================
+
+The vmprint() function recursively walks the 3-level Sv39 page table
+and prints each valid PTE with its depth, virtual address, raw PTE
+bits, and physical address.
+
+The output below comes from the kernel page table of the pgtbltest
+process (the same process inspected in the print_pgtbl() exercise).
+
+=== vmprint output ===
+
+page table 0x0000000087f22000
+ ..0x0000000000000000: pte 0x0000000021fc7801 pa 0x0000000087f1e000
+ .. ..0x0000000000000000: pte 0x0000000021fc7401 pa 0x0000000087f1d000
+ .. .. ..0x0000000000000000: pte 0x0000000021fc7c5b pa 0x0000000087f1f000
+ .. .. ..0x0000000000001000: pte 0x0000000021fc705b pa 0x0000000087f1c000
+ .. .. ..0x0000000000002000: pte 0x0000000021fc6cd7 pa 0x0000000087f1b000
+ .. .. ..0x0000000000003000: pte 0x0000000021fc6807 pa 0x0000000087f1a000
+ .. .. ..0x0000000000004000: pte 0x0000000021fc64d7 pa 0x0000000087f19000
+ ..0x0000003fc0000000: pte 0x0000000021fc8401 pa 0x0000000087f21000
+ .. ..0x0000003fffe00000: pte 0x0000000021fc8001 pa 0x0000000087f20000
+ .. .. ..0x0000003fffffd000: pte 0x0000000021fd4853 pa 0x0000000087f52000
+ .. .. ..0x0000003fffffe000: pte 0x0000000021fd00c7 pa 0x0000000087f40000
+ .. .. ..0x0000003ffffff000: pte 0x000000002000184b pa 0x0000000080006000
+
+The indentation shows the 3-level Sv39 page table hierarchy:
+  " .."         = Level 2 (root page directory)
+  " .. .."      = Level 1 (second-level page directory)
+  " .. .. .."   = Level 0 (leaf page table)
+
+=== Leaf-page explanations ===
+
+                                        Permission bits
+Leaf VA        Content                  V R W X U A D   Relation to print_pgtbl()
+------------------------------------------------------------------------------------------
+0x0000         text page 1              1 1 0 1 1 1 0   Same as print_pgtbl VA 0x0
+0x1000         text page 2              1 1 0 1 1 1 0   Same as print_pgtbl VA 0x1000
+0x2000         data/BSS page            1 1 1 0 1 1 1   Same as print_pgtbl VA 0x2000
+                                                         (D=1 now vs D=0 earlier
+                                                          because exec wrote data)
+0x3000         guard page (supervisor)  1 1 1 0 0 0 0   Same as print_pgtbl VA 0x3000
+0x4000         user stack page          1 1 1 0 1 1 1   Same as print_pgtbl VA 0x4000
+0x3FFFFFD000   USYSCALL page            1 1 0 0 1 1 0   NOT in print_pgtbl output
+                                                         (added by ugetpid exercise)
+0x3FFFFFE000   TRAPFRAME page           1 1 1 0 0 1 1   Same as print_pgtbl VA 0x3FFFFFE000
+0x3FFFFFF000   TRAMPOLINE page          1 1 0 1 0 1 0   Same as print_pgtbl VA 0x3FFFFFF000
+
+Key observations:
+- The vmprint output includes ALL valid PTEs at ALL levels, not just
+  leaf entries. The print_pgtbl() function only queries specific leaf
+  VAs (first 10 and last 10 pages) via the pgpte() system call.
+- The non-leaf PTEs (level 2 and level 1) point to page-table-pages
+  (physical pages that contain the next level of PTEs), NOT to actual
+  data pages. Their (PTE_R|PTE_W|PTE_X) == 0 identifies them as
+  non-leaf entries.
+- Level 2 entry 0 covers VAs 0x00000000-0x3FFFFFFF (1 GiB).
+  Level 2 entry 255 covers VAs 0x3FC00000-0x3FFFFFFF (the top 1 GiB,
+  containing trampoline, trapframe, and USYSCALL).
+- Level 1 entry 0 (under level-2 entry 0) covers VAs 0x000000-0x1FFFFF
+  (2 MiB of low memory for text/data/stack).
+- Level 1 entry 511 (under level-2 entry 255) covers the top 2 MiB
+  for the high reserved pages.
